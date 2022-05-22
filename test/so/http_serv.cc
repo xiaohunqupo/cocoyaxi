@@ -23,6 +23,8 @@ DEF_int32(port, 80, "http server port");
 DEF_string(key, "", "private key file");
 DEF_string(ca, "", "certificate file");
 
+int gCount = 3;
+
 int main(int argc, char** argv) {
     flag::init(argc, argv);
     FLG_cout = true;
@@ -48,7 +50,7 @@ int main(int argc, char** argv) {
             } else if (req.is_method_put()) {
                 if (req.url() == "/hello") {
                     res.set_status(200);
-                    res.set_body("hello put");
+                    res.set_chunk("chunk", 5, --gCount == 0);
                 } else {
                     res.set_status(403);
                 }

@@ -463,7 +463,8 @@ struct http_res_t {
     void add_header(const char* k, const char* v);
     void add_header(const char* k, int v);
     void set_body(const void* s, size_t n);
-    fastring& body();
+    void set_chunk(const void* s, size_t n, bool last_chunk);
+    void chunk_end();
 
     // DO NOT change orders of the members here.
     uint32 status;
@@ -471,6 +472,8 @@ struct http_res_t {
     fastring* buf;
     fastring header;
     size_t body_size;
+    uint32 chunked; // 0: init, 1: chunk begin, 2: chunk end
+    uint32 count;
 };
 
 inline void http_req_t::clear() {
@@ -532,6 +535,39 @@ inline void http_res_t::set_body(const void* s, size_t n) {
     buf->append(s, n);
 }
 
+inline int hex2int(char c) {
+    if ('0' <= c && c <= '9') return c - '0';
+    if ('a' <= c && c <= 'f') return c - 'a' + 10;
+    if ('A' <= c && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+inline void int2hex(uint32 n, fastring& buf) {
+    auto& s = fastring_cache(); s.clear();
+    int r = fast::u32toh(n, (char*)s.data());
+    buf.append(s.data() + 2, r - 2);
+}
+
+inline void http_res_t::set_chunk(const void* s, size_t n, bool last_chunk) {
+    chunked = 1;
+    buf->clear();
+    if (++count == 1) {
+        (*buf) << version_str(version) << ' ' << status << ' ' << status_str(status) << "\r\n"
+               << "Transfer-Encoding: chunked\r\n"
+               << header << "\r\n";
+    }
+    if (n > 0) {
+        int2hex((uint32)n, *buf);
+        buf->append("\r\n", 2);
+        buf->append(s, n);
+        buf->append("\r\n", 2);
+    }
+    if (n == 0 || last_chunk) {
+        chunked = 2;
+        buf->append("0\r\n\r\n", 5);
+    }
+}
+
 const char* Req::header(const char* key) const {
     return _p->header(key);
 }
@@ -559,6 +595,10 @@ void Res::add_header(const char* k, int v) {
 
 void Res::set_body(const void* s, size_t n) {
     _p->set_body(s, n);
+}
+
+void Res::set_chunk(const void* s, size_t n, bool last_chunk) {
+    _p->set_chunk(s, n, last_chunk);
 }
 
 Res::~Res() {
@@ -708,13 +748,6 @@ void ServerImpl::start(const char* ip, int port, const char* key, const char* ca
     CHECK(_on_req != NULL) << "req callback not set..";
     _serv.on_connection(&ServerImpl::on_connection, this);
     _serv.start(ip, port, key, ca);
-}
-
-inline int hex2int(char c) {
-    if ('0' <= c && c <= '9') return c - '0';
-    if ('a' <= c && c <= 'f') return c - 'a' + 10;
-    if ('A' <= c && c <= 'F') return c - 'A' + 10;
-    return -1;
 }
 
 void send_error_message(int err, http_res_t* res, tcp::Connection* conn) {
@@ -912,16 +945,31 @@ void ServerImpl::on_connection(tcp::Connection conn) {
                 if (s.empty() || s.tolower() != "keep-alive") need_close = true;
             }
 
-            s.clear();
-            pres->buf = &s;
-            _on_req(req, res);
-            if (s.empty()) pres->set_body("", 0);
+            do {
+                s.clear();
+                pres->buf = &s;
+                _on_req(req, res);
 
-            r = conn.send(s.data(), (int)s.size(), FLG_http_send_timeout);
-            if (r <= 0) goto send_err;
+                if (!pres->chunked) {
+                    if (s.empty()) pres->set_body("", 0);
+                    r = conn.send(s.data(), (int)s.size(), FLG_http_send_timeout);
+                    if (r <= 0) goto send_err;
 
-            s.resize(s.size() - pres->body_size);
-            HTTPLOG << "http send res: " << s;
+                    s.resize(s.size() - pres->body_size);
+                    HTTPLOG << "http send res: " << s;
+
+                } else {
+                    if (!s.empty()) {
+                        r = conn.send(s.data(), (int)s.size(), FLG_http_send_timeout);
+                        if (r <= 0) goto send_err;
+                    }
+                    if (pres->chunked == 2) {
+                        pres->chunked = 0;
+                        pres->count = 0;
+                    }
+                }
+            } while (pres->chunked > 0);
+
             if (need_close) { conn.close(); goto end; }
         };
 

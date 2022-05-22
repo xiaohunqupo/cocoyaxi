@@ -274,6 +274,11 @@ class __coapi Res {
     void set_body(const char* s) { this->set_body(s, strlen(s)); }
     void set_body(const fastring& s) { this->set_body(s.data(), s.size()); }
 
+    /**
+     * send chunked data
+     */
+    void set_chunk(const void* s, size_t n, bool last_chunk=false);
+
   private:
     http_res_t* _p;
 };
